@@ -13,7 +13,7 @@ load_dotenv()
 app = Flask(__name__)
 
 class SmartWebSentinel:
-    def _init_(self):
+    def __init__(self):
         # Initialize previous_state FIRST before any other operations
         self.previous_state = {}
         self.storage_file = "storage/last_state.json"
