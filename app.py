@@ -4,267 +4,318 @@ from bs4 import BeautifulSoup
 import hashlib
 import json
 from datetime import datetime
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template, request, redirect, url_for
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 
 class SmartWebSentinel:
     def __init__(self):
-        # Initialize previous_state FIRST before any other operations
-        self.previous_state = {}
-        self.storage_file = "storage/last_state.json"
+        self.storage_file = "storage/websites.json"
+        self.settings_file = "storage/settings.json"
         os.makedirs("storage", exist_ok=True)
-        # Then load from file
-        self.load_previous_state()
+        self.websites = self.load_websites()
+        self.settings = self.load_settings()
         print("✅ SmartWeb Sentinel initialized successfully!")
     
-    def load_previous_state(self):
-        """Load previous state from JSON file"""
+    def load_websites(self):
         try:
             if os.path.exists(self.storage_file):
                 with open(self.storage_file, 'r') as f:
-                    loaded_data = json.load(f)
-                    self.previous_state = loaded_data
-                print(f"📁 Loaded previous state with {len(self.previous_state)} URLs")
-            else:
-                self.previous_state = {}
-                print("📁 No previous state found - starting fresh")
+                    return json.load(f)
+            return []
         except Exception as e:
-            print(f"❌ Error loading previous state: {e}")
-            self.previous_state = {}
+            print(f"❌ Error loading websites: {e}")
+            return []
     
-    def save_current_state(self, url, content_hash):
-        """Save current state to JSON file"""
+    def save_websites(self):
         try:
-            # Ensure previous_state exists
-            if not hasattr(self, 'previous_state'):
-                self.previous_state = {}
-                
-            self.previous_state[url] = {
-                'hash': content_hash,
-                'last_checked': datetime.now().isoformat()
-            }
             with open(self.storage_file, 'w') as f:
-                json.dump(self.previous_state, f, indent=2)
-            print(f"💾 Saved state for {url}")
+                json.dump(self.websites, f, indent=2)
         except Exception as e:
-            print(f"❌ Error saving state: {e}")
+            print(f"❌ Error saving websites: {e}")
+    
+    def load_settings(self):
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    return json.load(f)
+            return {
+                'email_enabled': False,
+                'sms_enabled': False,
+                'notification_email': '',
+                'notification_phone': ''
+            }
+        except Exception as e:
+            print(f"❌ Error loading settings: {e}")
+            return {}
+    
+    def save_settings(self):
+        try:
+            with open(self.settings_file, 'w') as f:
+                json.dump(self.settings, f, indent=2)
+        except Exception as e:
+            print(f"❌ Error saving settings: {e}")
+    
+    def add_website(self, url, name, scan_interval=10):
+        for site in self.websites:
+            if site['url'] == url:
+                return False, "Website already exists"
+        
+        website = {
+            'url': url,
+            'name': name,
+            'scan_interval': scan_interval,
+            'hash': None,
+            'last_checked': None,
+            'scan_count': 0,
+            'changed': False,
+            'added_on': datetime.now().isoformat()
+        }
+        
+        self.websites.append(website)
+        self.save_websites()
+        return True, "Website added successfully"
+    
+    def delete_website(self, url):
+        self.websites = [site for site in self.websites if site['url'] != url]
+        self.save_websites()
+        return True, "Website deleted"
     
     def get_content_hash(self, url):
-        """Get hash of website content"""
         try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
-            print(f"🔍 Scanning VIT website...")
             response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Remove unwanted elements
             for element in soup(["script", "style"]):
                 element.decompose()
             
-            # Get clean text
             text = soup.get_text()
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             clean_text = ' '.join(chunk for chunk in chunks if chunk)
             
-            # Create hash
-            content_hash = hashlib.md5(clean_text[:2000].encode()).hexdigest()
-            print(f"✅ VIT website scanned successfully")
-            return content_hash
+            content_hash = hashlib.md5(clean_text[:5000].encode()).hexdigest()
+            return content_hash, None
             
         except Exception as e:
-            print(f"❌ Error scanning VIT: {str(e)}")
-            return None
+            return None, str(e)
     
-    def send_sms_alert(self, message):
-        """Send SMS using free APIs"""
-        try:
-            sms_enabled = os.getenv('SMS_ENABLED', 'false').lower() == 'true'
-            if not sms_enabled:
-                print("📱 SMS alerts disabled")
-                return False
-            
-            phone_number = os.getenv('PHONE_NUMBER')
-            sms_api = os.getenv('SMS_API', 'textbelt')
-            
-            if not phone_number:
-                print("❌ Phone number not configured")
-                return False
-            
-            sms_message = f"VIT Alert: {message}"
-            print(f"📱 Attempting SMS to {phone_number} via {sms_api}")
-            
-            if sms_api == 'textbelt':
-                return self._send_via_textbelt(phone_number, sms_message)
-            elif sms_api == 'callmebot':
-                return self._send_via_callmebot(phone_number, sms_message)
-            else:
-                return False
+    def scan_website(self, url):
+        for website in self.websites:
+            if website['url'] == url:
+                current_hash, error = self.get_content_hash(url)
                 
+                if error:
+                    return False, f"Scan failed: {error}", False
+                
+                website['scan_count'] = website.get('scan_count', 0) + 1
+                website['last_checked'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+                
+                if website['hash'] is None:
+                    website['hash'] = current_hash
+                    website['changed'] = False
+                    self.save_websites()
+                    return True, "First scan completed - baseline established", False
+                
+                if website['hash'] != current_hash:
+                    website['changed'] = True
+                    old_hash = website['hash']
+                    website['hash'] = current_hash
+                    self.save_websites()
+                    
+                    self.send_notification(website['name'], website['url'])
+                    
+                    return True, "Change detected!", True
+                else:
+                    website['changed'] = False
+                    self.save_websites()
+                    return True, "No changes detected", False
+        
+        return False, "Website not found", False
+    
+    def scan_all_websites(self):
+        results = []
+        changes_found = 0
+        
+        for website in self.websites:
+            success, message, changed = self.scan_website(website['url'])
+            if changed:
+                changes_found += 1
+            results.append({
+                'url': website['url'],
+                'name': website['name'],
+                'success': success,
+                'changed': changed
+            })
+        
+        return results, changes_found
+    
+    def send_notification(self, site_name, site_url):
+        try:
+            if self.settings.get('email_enabled') and self.settings.get('notification_email'):
+                print(f"📧 Would send email to {self.settings['notification_email']}")
+            
+            if self.settings.get('sms_enabled') and self.settings.get('notification_phone'):
+                phone = self.settings['notification_phone']
+                message = f"Alert: {site_name} has changed! Check {site_url}"
+                self.send_sms(phone, message)
+            
+            print(f"🔔 Notification sent for {site_name}")
+            return True
         except Exception as e:
-            print(f"❌ SMS failed: {str(e)}")
+            print(f"❌ Notification failed: {e}")
             return False
     
-    def _send_via_textbelt(self, phone_number, message):
-        """Send SMS via TextBelt API"""
+    def send_sms(self, phone_number, message):
         try:
             resp = requests.post('https://textbelt.com/text', {
                 'phone': phone_number,
                 'message': message,
                 'key': 'textbelt'
-            })
+            }, timeout=10)
             
             result = resp.json()
             if result.get('success'):
-                print("✅ SMS sent via TextBelt!")
+                print(f"✅ SMS sent to {phone_number}")
                 return True
             else:
-                error_msg = result.get('error', 'Unknown error')
-                print(f"❌ TextBelt error: {error_msg}")
+                print(f"❌ SMS failed: {result.get('error', 'Unknown error')}")
                 return False
         except Exception as e:
-            print(f"❌ TextBelt failed: {str(e)}")
+            print(f"❌ SMS error: {e}")
             return False
     
-    def _send_via_callmebot(self, phone_number, message):
-        """Send SMS via CallMeBot API"""
-        try:
-            intl_number = f"+91{phone_number}"
-            url = f"https://api.callmebot.com/sms/send.php"
-            params = {
-                'phone': intl_number,
-                'text': message,
-                'apikey': '123456'
-            }
-            
-            resp = requests.get(url, params=params, timeout=10)
-            
-            if resp.status_code == 200:
-                print("✅ SMS sent via CallMeBot!")
-                return True
-            else:
-                print(f"❌ CallMeBot error: {resp.text}")
-                return False
-        except Exception as e:
-            print(f"❌ CallMeBot failed: {str(e)}")
-            return False
-    
-    def check_vit_website(self):
-        """Check if VIT website has changed"""
-        url = "https://vit.ac.in"
-        print(f"🔄 Checking VIT main website...")
+    def get_stats(self):
+        total_scans = sum(site.get('scan_count', 0) for site in self.websites)
+        changes = sum(1 for site in self.websites if site.get('changed', False))
         
-        # Ensure previous_state exists
-        if not hasattr(self, 'previous_state'):
-            self.previous_state = {}
-            print("⚠ previous_state was missing - created new")
+        notifications_status = "Disabled"
+        if self.settings.get('email_enabled') or self.settings.get('sms_enabled'):
+            notifications_status = "Enabled"
         
-        current_hash = self.get_content_hash(url)
-        
-        if not current_hash:
-            return False, "Scan failed - could not access VIT website"
-        
-        previous_data = self.previous_state.get(url, {})
-        previous_hash = previous_data.get('hash')
-        
-        if not previous_hash:
-            print(f"📝 First scan completed")
-            self.save_current_state(url, current_hash)
-            return False, "First scan completed - monitoring started"
-        
-        if previous_hash != current_hash:
-            print(f"🚨 CHANGE DETECTED on VIT website!")
-            self.save_current_state(url, current_hash)
-            
-            alert_message = "VIT website content changed! Check for updates."
-            sms_sent = self.send_sms_alert(alert_message)
-            
-            if sms_sent:
-                return True, "CHANGE DETECTED! SMS sent to your mobile 📱"
-            else:
-                return True, "CHANGE DETECTED! (SMS failed to send)"
-        else:
-            print(f"✅ No changes on VIT website")
-            self.save_current_state(url, current_hash)
-            return False, "No changes detected"
+        return {
+            'total_scans': total_scans,
+            'changes_detected': changes,
+            'notifications_status': notifications_status
+        }
 
-# Initialize the monitor - THIS MUST HAPPEN AFTER CLASS DEFINITION
-print("🛡 Initializing SmartWeb Sentinel...")
 sentinel = SmartWebSentinel()
 
 @app.route('/')
 def home():
+    stats = sentinel.get_stats()
+    
+    return render_template('index.html',
+        websites=sentinel.websites,
+        total_scans=stats['total_scans'],
+        changes_detected=stats['changes_detected'],
+        notifications_status=stats['notifications_status'],
+        email_enabled=sentinel.settings.get('email_enabled', False),
+        sms_enabled=sentinel.settings.get('sms_enabled', False),
+        notification_email=sentinel.settings.get('notification_email', ''),
+        notification_phone=sentinel.settings.get('notification_phone', ''),
+        recent_alerts=[]
+    )
+
+@app.route('/add-website', methods=['POST'])
+def add_website():
+    url = request.form.get('url')
+    name = request.form.get('name')
+    scan_interval = int(request.form.get('scan_interval', 10))
+    
+    if not url or not name:
+        return jsonify({'success': False, 'message': 'URL and name are required'}), 400
+    
+    success, message = sentinel.add_website(url, name, scan_interval)
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/delete-website', methods=['POST'])
+def delete_website():
+    data = request.get_json()
+    url = data.get('url')
+    
+    success, message = sentinel.delete_website(url)
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/scan-website', methods=['POST'])
+def scan_website():
+    data = request.get_json()
+    url = data.get('url')
+    
+    success, message, changed = sentinel.scan_website(url)
     return jsonify({
-        "service": "SmartWeb Sentinel",
-        "status": "🟢 Running",
-        "monitoring": "VIT University Website",
-        "website": "https://vit.ac.in",
-        "phone_number": "9392871897",
-        "endpoints": {
-            "scan": "/scan-now",
-            "status": "/status"
-        }
+        'success': success,
+        'message': message,
+        'changed': changed,
+        'timestamp': datetime.now().isoformat()
     })
 
-@app.route('/scan-now')
-def scan_now():
-    """Manually trigger website scanning"""
-    try:
-        has_changed, message = sentinel.check_vit_website()
-        
-        return jsonify({
-            "website": "https://vit.ac.in",
-            "changed": has_changed,
-            "message": message,
-            "timestamp": datetime.now().isoformat()
-        })
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "message": "Scan failed due to error"
-        }), 500
+@app.route('/scan-all', methods=['POST'])
+def scan_all():
+    results, changes_found = sentinel.scan_all_websites()
+    
+    message = f"Scanned {len(results)} websites. "
+    if changes_found > 0:
+        message += f"Found {changes_found} change(s)!"
+    else:
+        message += "No changes detected."
+    
+    return jsonify({
+        'success': True,
+        'message': message,
+        'results': results,
+        'changes_found': changes_found
+    })
+
+@app.route('/update-notifications', methods=['POST'])
+def update_notifications():
+    sentinel.settings['email_enabled'] = 'email_enabled' in request.form
+    sentinel.settings['sms_enabled'] = 'sms_enabled' in request.form
+    sentinel.settings['notification_email'] = request.form.get('email', '')
+    sentinel.settings['notification_phone'] = request.form.get('phone', '')
+    
+    sentinel.save_settings()
+    
+    return jsonify({'success': True, 'message': 'Settings updated'})
 
 @app.route('/status')
 def status():
-    """System status endpoint"""
-    try:
-        # Ensure sentinel has previous_state
-        if hasattr(sentinel, 'previous_state'):
-            storage_count = len(sentinel.previous_state)
-        else:
-            storage_count = 0
-            
+    stats = sentinel.get_stats()
+    return jsonify({
+        'status': 'operational',
+        'websites_monitored': len(sentinel.websites),
+        'total_scans': stats['total_scans'],
+        'changes_detected': stats['changes_detected'],
+        'notifications': stats['notifications_status']
+    })
+
+@app.route('/api/scan-now')
+def api_scan_now():
+    if sentinel.websites:
+        url = sentinel.websites[0]['url']
+        success, message, changed = sentinel.scan_website(url)
         return jsonify({
-            "status": "operational",
-            "monitoring": "VIT University",
-            "last_scan": datetime.now().isoformat(),
-            "storage_entries": storage_count,
-            "sms_enabled": os.getenv('SMS_ENABLED', 'false')
+            'success': success,
+            'message': message,
+            'changed': changed
         })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
+    return jsonify({'success': False, 'message': 'No websites configured'})
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("🛡  SMARTWEB SENTINEL - FIXED VERSION")
-    print("🎯 Monitoring: VIT University Website")
-    print("📱 SMS Alerts: 9392871897")
-    print("=" * 50)
+    print("=" * 60)
+    print("🛡  SMARTWEB SENTINEL - Website Change Monitor")
+    print(f"📊 Monitoring {len(sentinel.websites)} website(s)")
+    print("=" * 60)
     print(f"🌐 Dashboard: http://localhost:5000")
-    print(f"🔍 Manual Scan: http://localhost:5000/scan-now")
-    print("=" * 50)
+    print("=" * 60)
     
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
